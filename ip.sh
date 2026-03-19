@@ -1,32 +1,34 @@
 #!/bin/bash
+set -e
 
-CONFIG="/etc/wireguard/proxy.conf"
-SOCKS5="127.0.0.1:40000"
+# ==================== 基础配置 ====================
+CONFIG_FILE="/etc/wireguard/proxy.conf"
+SOCKS5_ADDR="127.0.0.1:40000"
 DEFAULT_EP="engage.cloudflareclient.com:2408"
 
-clear
-echo "====================================="
-echo " 🚀 WARP 智能优选脚本（官方IP + 自动选协议）"
-echo "====================================="
-echo " 1 智能优选（自动选 IPv4/IPv6）"
-echo " 2 强制优选 IPv4（官方解析）"
-echo " 3 强制优选 IPv6（官方解析）"
-echo " 4 测试当前代理"
-echo " 5 恢复默认官方节点"
-echo "====================================="
-read -p "请选择 [1/2/3/4/5]: " opt
+# ==================== 工具函数 ====================
+# 修复 DNS 为公共 DNS
+fix_dns() {
+    echo "🔧 正在修复 DNS 配置..."
+    cat > /etc/resolv.conf <<EOF
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+nameserver 223.5.5.5
+EOF
+    echo "✅ DNS 已修复为公共 DNS"
+}
 
-# 测试单个节点延迟
+# 测试节点连通性与延迟
 test_node() {
-    local EP=$1
+    local EP="$1"
     echo -n "🧪 测试 $EP ... "
     systemctl stop wireproxy >/dev/null 2>&1
-    sed -i "s|Endpoint =.*|Endpoint = $EP|" $CONFIG
+    sed -i "s|Endpoint =.*|Endpoint = $EP|" "$CONFIG_FILE"
     systemctl restart wireproxy >/dev/null 2>&1
     sleep 2
 
-    # 用下载测速取延迟
-    local cost=$(curl --socks5 $SOCKS5 https://speed.cloudflare.com/__down?bytes=50000 -m 8 -o /dev/null -w "%{time_total}\n" 2>/dev/null)
+    # 测速取延迟
+    local cost=$(curl --socks5 "$SOCKS5_ADDR" https://speed.cloudflare.com/__down?bytes=50000 -m 8 -o /dev/null -w "%{time_total}\n" 2>/dev/null)
     if (( $(echo "$cost > 0 && $cost < 8" | bc -l) )); then
         echo "✅ 延迟: ${cost}s"
         echo "$cost $EP" >> /tmp/warp_result.txt
@@ -37,17 +39,17 @@ test_node() {
     fi
 }
 
-# 解析官方域名IP
+# 解析官方域名 IP
 resolve_official() {
-    local TYPE=$1
+    local TYPE="$1"
     if [ "$TYPE" = "4" ]; then
-        dig +short $DEFAULT_EP A | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+        dig +short "$DEFAULT_EP" A | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
     else
-        dig +short $DEFAULT_EP AAAA | grep -E '^[0-9a-fA-F:]+$' | sed 's/^/[/; s/$/]/'
+        dig +short "$DEFAULT_EP" AAAA | grep -E '^[0-9a-fA-F:]+$' | sed 's/^/[/; s/$/]/'
     fi
 }
 
-# 自动选最快
+# 选择最快节点
 find_fastest() {
     rm -f /tmp/warp_result.txt
     local LIST=("$@")
@@ -57,15 +59,17 @@ find_fastest() {
 
     local FASTEST=$(sort -n /tmp/warp_result.txt | head -n1 | awk '{print $2}')
     if [ -n "$FASTEST" ]; then
-        sed -i "s|Endpoint =.*|Endpoint = $FASTEST|" $CONFIG
+        sed -i "s|Endpoint =.*|Endpoint = $FASTEST|" "$CONFIG_FILE"
         systemctl restart wireproxy
         sleep 2
         echo -e "\n🚀 已切换到最快官方节点: $FASTEST"
-        curl --socks5 $SOCKS5 https://ipinfo.io -m 8
+        curl --socks5 "$SOCKS5_ADDR" https://ipinfo.io -m 8
     else
-        echo -e "\n⚠️  无可用节点，恢复默认..."
-        sed -i "s|Endpoint =.*|Endpoint = $DEFAULT_EP|" $CONFIG
+        echo -e "\n⚠️  无可用节点，自动恢复默认..."
+        sed -i "s|Endpoint =.*|Endpoint = $DEFAULT_EP|" "$CONFIG_FILE"
         systemctl restart wireproxy
+        sleep 2
+        curl --socks5 "$SOCKS5_ADDR" https://ipinfo.io -m 8
     fi
 }
 
@@ -74,9 +78,7 @@ check_network() {
     local has_ipv4=0
     local has_ipv6=0
 
-    # 检测 IPv4 连通性
     ping -4 -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 && has_ipv4=1
-    # 检测 IPv6 连通性
     ping -6 -c 1 -W 2 2606:4700:4700::1111 >/dev/null 2>&1 && has_ipv6=1
 
     echo "📡 网络检测结果："
@@ -84,7 +86,7 @@ check_network() {
     echo "   IPv6 连通性: $( [ $has_ipv6 -eq 1 ] && echo "✅" || echo "❌" )"
 
     if [ $has_ipv4 -eq 1 ] && [ $has_ipv6 -eq 1 ]; then
-        echo "🔍 同时支持 IPv4/IPv6，优先测速 IPv6"
+        echo "🔍 同时支持 IPv4/IPv6，优先 IPv6"
         return 2
     elif [ $has_ipv4 -eq 1 ]; then
         echo "🔍 仅支持 IPv4"
@@ -98,9 +100,23 @@ check_network() {
     fi
 }
 
+# ==================== 主菜单 ====================
+clear
+echo "====================================="
+echo " 🚀 WARP 智能优选脚本（完整版）"
+echo "====================================="
+echo " 1 智能优选（自动修DNS + 选IPv4/IPv6）"
+echo " 2 强制优选 IPv4（官方解析）"
+echo " 3 强制优选 IPv6（官方解析）"
+echo " 4 测试当前代理"
+echo " 5 恢复默认官方节点"
+echo "====================================="
+read -p "请选择 [1/2/3/4/5]: " opt
+
 case $opt in
     1)
-        echo -e "\n🧠 智能模式：自动检测网络..."
+        echo -e "\n🧠 智能模式：先修复 DNS + 自动检测网络..."
+        fix_dns
         check_network
         net_type=$?
         if [ $net_type -eq 0 ]; then
@@ -110,8 +126,9 @@ case $opt in
             IPV4=($(resolve_official 4))
             if [ ${#IPV4[@]} -eq 0 ]; then
                 echo "❌ 未解析到 IPv4，恢复默认"
-                sed -i "s|Endpoint =.*|Endpoint = $DEFAULT_EP|" $CONFIG
+                sed -i "s|Endpoint =.*|Endpoint = $DEFAULT_EP|" "$CONFIG_FILE"
                 systemctl restart wireproxy
+                curl --socks5 "$SOCKS5_ADDR" https://ipinfo.io -m 8
                 exit 1
             fi
             echo "✅ 解析到 ${#IPV4[@]} 个 IPv4 节点"
@@ -121,8 +138,9 @@ case $opt in
             IPV6=($(resolve_official 6))
             if [ ${#IPV6[@]} -eq 0 ]; then
                 echo "❌ 未解析到 IPv6，恢复默认"
-                sed -i "s|Endpoint =.*|Endpoint = $DEFAULT_EP|" $CONFIG
+                sed -i "s|Endpoint =.*|Endpoint = $DEFAULT_EP|" "$CONFIG_FILE"
                 systemctl restart wireproxy
+                curl --socks5 "$SOCKS5_ADDR" https://ipinfo.io -m 8
                 exit 1
             fi
             echo "✅ 解析到 ${#IPV6[@]} 个 IPv6 节点"
@@ -130,24 +148,28 @@ case $opt in
         fi
         ;;
     2)
+        fix_dns
         echo -e "\n🔥 强制优选 IPv4（官方解析）..."
         IPV4=($(resolve_official 4))
         if [ ${#IPV4[@]} -eq 0 ]; then
             echo "❌ 未解析到 IPv4，恢复默认"
-            sed -i "s|Endpoint =.*|Endpoint = $DEFAULT_EP|" $CONFIG
+            sed -i "s|Endpoint =.*|Endpoint = $DEFAULT_EP|" "$CONFIG_FILE"
             systemctl restart wireproxy
+            curl --socks5 "$SOCKS5_ADDR" https://ipinfo.io -m 8
             exit 1
         fi
         echo "✅ 解析到 ${#IPV4[@]} 个 IPv4 节点"
         find_fastest "${IPV4[@]}"
         ;;
     3)
+        fix_dns
         echo -e "\n🔥 强制优选 IPv6（官方解析）..."
         IPV6=($(resolve_official 6))
         if [ ${#IPV6[@]} -eq 0 ]; then
             echo "❌ 未解析到 IPv6，恢复默认"
-            sed -i "s|Endpoint =.*|Endpoint = $DEFAULT_EP|" $CONFIG
+            sed -i "s|Endpoint =.*|Endpoint = $DEFAULT_EP|" "$CONFIG_FILE"
             systemctl restart wireproxy
+            curl --socks5 "$SOCKS5_ADDR" https://ipinfo.io -m 8
             exit 1
         fi
         echo "✅ 解析到 ${#IPV6[@]} 个 IPv6 节点"
@@ -155,14 +177,14 @@ case $opt in
         ;;
     4)
         echo -e "\n📶 测试当前代理..."
-        curl --socks5 $SOCKS5 https://ipinfo.io -m 8
+        curl --socks5 "$SOCKS5_ADDR" https://ipinfo.io -m 8
         ;;
     5)
-        sed -i "s|Endpoint =.*|Endpoint = $DEFAULT_EP|" $CONFIG
+        sed -i "s|Endpoint =.*|Endpoint = $DEFAULT_EP|" "$CONFIG_FILE"
         systemctl restart wireproxy
         sleep 2
         echo -e "\n✅ 已恢复默认节点"
-        curl --socks5 $SOCKS5 https://ipinfo.io -m 8
+        curl --socks5 "$SOCKS5_ADDR" https://ipinfo.io -m 8
         ;;
     *)
         echo "❌ 输入错误"
