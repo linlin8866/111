@@ -7,6 +7,9 @@ curl -L https://raw.githubusercontent.com/linlin8866/111/main/ip.sh -o /usr/bin/
 
 一键关闭ipv4
 
+ip addr
+
+
 ip -4 addr flush dev ens3 && ip -4 route flush dev ens3 && echo "✅ IPv4 已临时关闭，仅 IPv6 可用"
 
 dhclient -4 ens3
